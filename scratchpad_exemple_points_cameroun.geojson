@@ -1,0 +1,20 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "Marché Mfoundi", "color": "#7A5FBF" },
+      "geometry": { "type": "Point", "coordinates": [11.518867, 3.868] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "Stade Ahmadou Ahidjo", "color": "#2E8B57" },
+      "geometry": { "type": "Point", "coordinates": [11.5175, 3.8712] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "Point personnalisé exemple" },
+      "geometry": { "type": "Point", "coordinates": [11.5189, 3.8677] }
+    }
+  ]
+}
