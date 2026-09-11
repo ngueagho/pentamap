@@ -7,13 +7,17 @@ avec des flèches directionnelles superposées au flux caméra.
 ## ✅ Ce qui fonctionne, testé sur device réel (Pixel 6 Pro, wifi)
 
 **Navigation extérieure — bout en bout, fonctionnelle :**
-- Écran d'accueil → **carte réelle** (serveur de tuiles OpenStreetMap
-  standard, aucune clé API/compte) avec une épingle par repère cartographié
-  → tap sur une
-  épingle → choix "Naviguer jusqu'ici" ou, si le lieu a aussi été
+- Écran d'accueil → **carte vectorielle** (MapLibre GL + tuiles OpenFreeMap,
+  gratuit, aucune clé API/compte) avec un style recoloré aux couleurs de
+  marque (bleu/orange) et un cercle par repère cartographié ou point
+  d'intérêt personnalisé → tap sur un
+  point → choix "Naviguer jusqu'ici" ou, si le lieu a aussi été
   cartographié à l'intérieur, "Entrer et naviguer à l'intérieur" (réutilise
   le même graphe, le nœud tapé sert de départ indoor — pas besoin de
   scanner un QR si on vient d'y arriver par la navigation extérieure).
+- La carte se synchronise automatiquement au démarrage avec le dernier
+  graphe et les derniers points d'intérêt envoyés au serveur — plus besoin
+  de sélectionner manuellement une carte à charger.
 - Position de l'utilisateur affichée en direct sur la carte (point bleu).
 - Position GPS courante injectée dans le graphe (`MapGraph.withVirtualStart`),
   calcul d'itinéraire par Dijkstra (`RouteCalculator`), avancement automatique
@@ -144,7 +148,14 @@ adb reverse tcp:8420 tcp:8420
 Endpoints : `POST/GET /graphs`, `GET /graphs/{id}`, `DELETE /graphs/{id}`,
 `POST /anchors`, `GET /anchors/nearby` (ce dernier prévu pour une future
 recherche d'ancres Cloud par proximité si on ajoute cette approche en plus
-des QR codes).
+des QR codes), `POST /pois/import`, `GET /pois`, `DELETE /pois/{id}`.
+
+**Import de points d'intérêt personnalisés** — plutôt que de scraper des
+services tiers (refusé, contraire à leurs CGU), l'opérateur importe ses
+propres données (fichier GeoJSON) directement **côté serveur**
+(`POST /pois/import`) : le parsing et le géocodage restent sur le backend,
+le client ne fait que consommer le rendu déjà prêt via `GET /pois` — voir
+`server/main.py` et `lib/src/core/models/custom_poi.dart`.
 
 ⚠️ Pour une utilisation réelle multi-appareils (pas juste du dev local), il
 faudra déployer ce serveur quelque part de réellement joignable (VPS, cloud)
@@ -160,34 +171,41 @@ JetBrains Mono (coordonnées/distances, effet "lecture d'instrument"), voir
 aiguille) revient sur l'accueil, l'écran d'arrivée et le cadre des QR codes
 comme fil visuel commun.
 
-⚠️ Tuiles de carte : serveur **OpenStreetMap standard** (`tile.openstreetmap.
-org`, via `flutter_map`), gratuit et sans clé/compte. CARTO Voyager avait été
-essayé en premier (rendu plus soigné) mais exige désormais une clé API même
-sur son offre gratuite — écarté pour rester cohérent avec le choix déjà fait
-d'éviter les comptes externes. Le serveur OSM public a une politique d'usage
-stricte pour les apps à fort trafic (voir leurs conditions) — à revoir avant
-une mise en production réelle (tuiles auto-hébergées, clé CARTO gratuite
-jusqu'à 5M requêtes/mois, ou un fournisseur payant).
+⚠️ Tuiles de carte : **tuiles vectorielles OpenFreeMap** (`tiles.openfreemap.
+org`, style de base "positron"), rendues par `maplibre_gl` — gratuit, sans
+clé/compte, sans limite de requêtes (contrairement à `tile.openstreetmap.org`
+utilisé avant, qui a une politique d'usage stricte pour les apps à fort
+trafic, ou CARTO Voyager qui exige désormais une clé API). Le style est
+recoloré aux couleurs de marque (`assets/map_style.json`, généré par un
+script Python à partir du style "positron" — routes, bâtiments, eau, parcs et
+libellés retouchés) et son attribution embarquée (source `openmaptiles`)
+inclut OpenStreetMap, OpenMapTiles et `www.propentatech.com`, affichée via le
+bouton "i" natif de MapLibre.
 
 ## Structure du code
 
 - `lib/src/app/` — `PentamapApp`, `HomeScreen`, `app_theme.dart` (palette +
   typo), `pentamap_mark.dart` (repère visuel).
 - `lib/src/core/models/` — `MapNode` (avec `floor`)/`MapEdge`/`MapGraph`
-  (graphe + Dijkstra + `withVirtualStart`).
+  (graphe + Dijkstra + `withVirtualStart`), `CustomPoi` (points d'intérêt
+  importés côté serveur).
 - `lib/src/core/services/` — `LocationService`, `CompassService`,
   `MotionService`, `BarometerService`, `GeoUtils`, `MapGraphNotifier` (état
-  partagé + persistance), `MapGraphApiClient` (backend), `QrWaypointCodec`.
+  partagé + persistance), `MapGraphApiClient` (backend), `QrWaypointCodec`,
+  `CustomPoiApiClient`/`CustomPoiNotifier` (points d'intérêt personnalisés,
+  cache local + source de vérité serveur).
 - `lib/src/features/navigation/` — `RouteCalculator`, `SensorFusionService`,
   `StepCounterService`, `NavigationNotifier`, `DestinationPickerScreen`
-  (extérieur), `IndoorDestinationPickerScreen`, `QrScanScreen`,
-  `ServerGraphPickerScreen`.
+  (carte extérieure MapLibre), `IndoorDestinationPickerScreen`,
+  `QrScanScreen`.
 - `lib/src/features/mapping/` — `MappingRecorderScreen`, `QrCodesScreen`.
 - `lib/src/features/camera_ar/` — `ArNavigationScreen` (modes extérieur et
   intérieur).
 - `assets/models/arrow.glb` — modèle 3D généré par script, format `.glb`
   binaire (le `.gltf`+base64 ne s'affichait pas correctement sur le
   chargeur natif Android — à retenir pour tout futur modèle).
+- `assets/map_style.json` — style vectoriel MapLibre recoloré aux couleurs
+  de marque (généré depuis le style "positron" d'OpenFreeMap).
 - `server/` — backend FastAPI (voir section dédiée ci-dessus).
 
 ## Notes pratiques
@@ -203,6 +221,9 @@ jusqu'à 5M requêtes/mois, ou un fournisseur payant).
 4. Org Android/iOS : `com.propentatech.pentamap`.
 5. Permission `ACTIVITY_RECOGNITION` (Android 10+) requise pour le podomètre
    — déjà ajoutée à `AndroidManifest.xml`.
+6. `maplibre_gl` nécessite **JDK 21** pour compiler sa partie Android
+   (`org.gradle.java.home` fixé dans `android/gradle.properties` — sinon
+   erreur Gradle `invalid source release: 21`).
 
 ## Lancer le projet
 
