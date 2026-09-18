@@ -1,25 +1,36 @@
 import '../services/geo_utils.dart';
+import 'building.dart';
 import 'map_edge.dart';
 import 'map_node.dart';
 
 /// Identifiant réservé au nœud virtuel injecté par [MapGraph.withVirtualStart].
 const virtualCurrentPositionNodeId = '__current_position__';
 
-/// Le graphe complet d'un établissement : tous les nœuds (repères GPS
-/// extérieurs + ancres visuelles intérieures) et les chemins qui les relient.
+/// Le graphe complet d'un établissement — potentiellement plusieurs
+/// bâtiments : tous les nœuds (repères GPS extérieurs + pièces intérieures,
+/// voir [MapNode.buildingId]) et les chemins qui les relient, plus les
+/// repères géographiques des bâtiments eux-mêmes ([buildings]).
 ///
-/// Construit côté serveur pendant la phase de cartographie, puis téléchargé
-/// par l'app pour le calcul d'itinéraire côté client.
+/// Un trajet entre une pièce du bâtiment A et une pièce du bâtiment B se
+/// calcule exactement comme n'importe quel autre trajet ([shortestPath]) :
+/// c'est le même graphe, il n'y a pas de notion de "mode" séparée.
+///
+/// Construit côté serveur (via l'admin web/app ou la cartographie physique),
+/// puis téléchargé par l'app pour le calcul d'itinéraire côté client.
 class MapGraph {
+  final String? id;
   final Map<String, MapNode> nodes;
   final List<MapEdge> edges;
+  final List<Building> buildings;
 
-  MapGraph({required this.nodes, required this.edges});
+  MapGraph({this.id, required this.nodes, required this.edges, this.buildings = const []});
 
   factory MapGraph.fromJson(Map<String, dynamic> json) {
     final nodesJson = json['nodes'] as List;
     final edgesJson = json['edges'] as List;
+    final buildingsJson = json['buildings'] as List? ?? const [];
     return MapGraph(
+      id: json['id'] as String?,
       nodes: {
         for (final n in nodesJson)
           (n as Map<String, dynamic>)['id'] as String: MapNode.fromJson(n),
@@ -27,13 +38,37 @@ class MapGraph {
       edges: edgesJson
           .map((e) => MapEdge.fromJson(e as Map<String, dynamic>))
           .toList(),
+      buildings: buildingsJson
+          .map((b) => Building.fromJson(b as Map<String, dynamic>))
+          .toList(),
     );
   }
 
   Map<String, dynamic> toJson() => {
+        if (id != null) 'id': id,
         'nodes': nodes.values.map((n) => n.toJson()).toList(),
         'edges': edges.map((e) => e.toJson()).toList(),
+        'buildings': buildings.map((b) => {'id': b.id, 'graphId': b.graphId, ...b.toJson()}).toList(),
       };
+
+  /// Les pièces (nœuds intérieurs) d'un bâtiment donné, groupées par étage.
+  Map<int, List<MapNode>> roomsByFloor(String buildingId) {
+    final result = <int, List<MapNode>>{};
+    for (final node in nodes.values) {
+      if (node.buildingId != buildingId) continue;
+      result.putIfAbsent(node.floor ?? 0, () => []).add(node);
+    }
+    return result;
+  }
+
+  MapGraph copyWith({List<MapNode>? nodeList, List<MapEdge>? edges, List<Building>? buildings}) {
+    return MapGraph(
+      id: id,
+      nodes: nodeList == null ? nodes : {for (final n in nodeList) n.id: n},
+      edges: edges ?? this.edges,
+      buildings: buildings ?? this.buildings,
+    );
+  }
 
   /// Liste d'adjacence : pour chaque nœud, les (voisin, distance) atteignables.
   Map<String, List<(String, double)>> _adjacency() {
@@ -132,7 +167,7 @@ class MapGraph {
       ));
     }
 
-    return MapGraph(nodes: newNodes, edges: newEdges);
+    return MapGraph(id: id, nodes: newNodes, edges: newEdges, buildings: buildings);
   }
 }
 

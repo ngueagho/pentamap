@@ -4,10 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/models/map_node.dart';
 import '../core/services/custom_poi_store.dart';
 import '../core/services/map_graph_store.dart';
+import '../features/admin/admin_screen.dart';
 import '../features/mapping/mapping_recorder_screen.dart';
 import '../features/navigation/destination_picker_screen.dart';
-import '../features/navigation/indoor_destination_picker_screen.dart';
-import '../features/navigation/qr_scan_screen.dart';
 import 'app_theme.dart';
 import 'pentamap_mark.dart';
 
@@ -25,10 +24,10 @@ class PentamapApp extends StatelessWidget {
   }
 }
 
-/// Écran d'accueil : deux modes de navigation (extérieur/GPS, intérieur/QR)
-/// présentés comme deux entrées distinctes — c'est la vraie structure de
-/// l'app, pas une liste de boutons interchangeables. "Cartographier" est un
-/// outil d'opérateur, volontairement en retrait.
+/// Écran d'accueil : une seule entrée vers la carte — pas de choix
+/// "extérieur"/"intérieur" à faire, la carte gère elle-même la transition
+/// (voir `DestinationPickerScreen`). "Cartographier" et "Administrer" sont
+/// des outils d'opérateur/gestionnaire, volontairement en retrait.
 ///
 /// Recharge la carte sauvegardée localement au démarrage (voir
 /// `map_graph_store.dart`) — les points cartographiés survivent donc à un
@@ -86,31 +85,37 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               const SizedBox(height: 28),
               _ModeCard(
                 color: PentamapColors.blue,
-                icon: Icons.satellite_alt_outlined,
-                title: 'Naviguer dehors',
-                subtitle: 'Guidage par GPS et boussole jusqu\'à un repère extérieur',
+                icon: Icons.map_outlined,
+                title: 'Explorer la carte',
+                subtitle: 'Cherchez une destination, dehors ou dans un bâtiment',
                 onTap: () => Navigator.of(context).push(
                   MaterialPageRoute(builder: (_) => const DestinationPickerScreen()),
                 ),
               ),
-              const SizedBox(height: 14),
-              _ModeCard(
-                color: PentamapColors.orange,
-                icon: Icons.qr_code_scanner,
-                title: 'Naviguer dedans',
-                subtitle: 'Scannez le QR code collé au mur pour démarrer',
-                onTap: () => _scanToNavigateIndoor(context),
-              ),
               const Spacer(),
               Center(
-                child: TextButton.icon(
-                  icon: const Icon(Icons.map_outlined, size: 18),
-                  label: const Text('Cartographier ce lieu (opérateur)'),
-                  onPressed: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute(builder: (_) => const MappingRecorderScreen()),
-                    );
-                  },
+                child: Wrap(
+                  spacing: 4,
+                  children: [
+                    TextButton.icon(
+                      icon: const Icon(Icons.admin_panel_settings_outlined, size: 18),
+                      label: const Text('Administrer'),
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => const AdminScreen()),
+                        );
+                      },
+                    ),
+                    TextButton.icon(
+                      icon: const Icon(Icons.threed_rotation, size: 18),
+                      label: const Text('Cartographier (AR)'),
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => const MappingRecorderScreen()),
+                        );
+                      },
+                    ),
+                  ],
                 ),
               ),
               if (graph != null)
@@ -127,22 +132,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _scanToNavigateIndoor(BuildContext context) async {
-    final result = await Navigator.of(context).push<(String, String)>(
-      MaterialPageRoute(builder: (_) => const QrScanScreen()),
-    );
-    if (result == null || !context.mounted) return;
-    final (graphId, nodeId) = result;
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => IndoorDestinationPickerScreen(
-          graphId: graphId,
-          startNodeId: nodeId,
         ),
       ),
     );

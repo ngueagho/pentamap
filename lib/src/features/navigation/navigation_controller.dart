@@ -122,9 +122,16 @@ class NavigationNotifier extends Notifier<NavigationState> {
   /// qui n'existe pas en intérieur. Avance à l'étape suivante dès que la
   /// distance accumulée dépasse celle du segment courant.
   ///
+  /// Ignore l'appel si l'étape courante vise un nœud extérieur (a des
+  /// coordonnées GPS) : c'est [updatePosition] qui fait alors autorité. Ça
+  /// permet à un même trajet continu de traverser plusieurs bâtiments — la
+  /// source de suivi (GPS ou odométrie à pas) bascule automatiquement étape
+  /// par étape selon le type du nœud visé, sans bouton de "mode" à choisir.
+  ///
   /// ⚠️ Approximatif (longueur de pas moyenne) — l'erreur ne s'accumule
   /// qu'entre deux recalages : un scan QR ([resyncToNode]) la remet à zéro.
   void advanceByDistance(double metersSinceLastCall) {
+    if (state.currentStep?.to.latitude != null) return;
     _distanceSinceLastNode += metersSinceLastCall;
     while (true) {
       final step = state.currentStep;

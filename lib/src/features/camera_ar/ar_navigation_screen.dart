@@ -23,16 +23,16 @@ import '../navigation/qr_scan_screen.dart';
 import '../navigation/sensor_fusion_service.dart';
 
 /// Écran de navigation : affiche le flux caméra et guide vers
-/// [destinationNodeId].
+/// [destinationNodeId] — un **seul** trajet continu, qui peut traverser
+/// plusieurs bâtiments (voir `MapGraph`/`Building`). Pas de "mode"
+/// intérieur/extérieur à choisir : les deux sources de suivi (GPS+boussole,
+/// odométrie à pas) tournent en permanence, et c'est le type du nœud visé
+/// par l'étape courante qui détermine laquelle fait réellement avancer la
+/// progression (voir le garde-fou dans `NavigationNotifier.advanceByDistance`).
 ///
-/// Deux modes, selon comment le point de départ est connu :
-/// - **Extérieur** ([indoorStartNodeId] == null) : position de départ =
-///   position GPS actuelle, orientation = fusion GPS + boussole.
-/// - **Intérieur** ([indoorStartNodeId] fourni, typiquement après un scan de
-///   QR code) : position de départ = ce nœud exact, avancement estimé par
-///   odométrie à pas (nombre de pas × longueur de foulée) plutôt que GPS
-///   (inutilisable en intérieur). Un bouton permet de rescanner un QR en
-///   cours de route pour corriger la dérive accumulée.
+/// [startNodeId] : si fourni (typiquement après un scan de QR code), le
+/// trajet part de ce nœud exact plutôt que de la position GPS actuelle —
+/// utile pour rentrer directement dans une navigation intérieure précise.
 ///
 /// ⚠️ En extérieur, la flèche agit comme une "boussole flottante" : position
 /// fixe devant la caméra, qui **tourne** pour indiquer le cap. En intérieur,
@@ -43,15 +43,13 @@ import '../navigation/sensor_fusion_service.dart';
 /// à chaque frame — hors scope de cette version.
 class ArNavigationScreen extends ConsumerStatefulWidget {
   final String destinationNodeId;
-  final String? indoorStartNodeId;
+  final String? startNodeId;
 
   const ArNavigationScreen({
     super.key,
     required this.destinationNodeId,
-    this.indoorStartNodeId,
+    this.startNodeId,
   });
-
-  bool get isIndoor => indoorStartNodeId != null;
 
   @override
   ConsumerState<ArNavigationScreen> createState() => _ArNavigationScreenState();
@@ -77,6 +75,7 @@ class _ArNavigationScreenState extends ConsumerState<ArNavigationScreen> {
   bool _isLoadingRoute = true;
   bool _hasError = false;
   bool _hasArrived = false;
+  bool _hasPromptedEntranceScan = false;
 
   @override
   void dispose() {
@@ -95,10 +94,10 @@ class _ArNavigationScreenState extends ConsumerState<ArNavigationScreen> {
       appBar: AppBar(
         title: const Text('Navigation'),
         actions: [
-          if (widget.isIndoor && !_hasArrived)
+          if (!_hasArrived)
             IconButton(
               icon: const Icon(Icons.qr_code_scanner),
-              tooltip: 'Rescanner un repère (corriger la position)',
+              tooltip: 'Scanner un QR (préciser/corriger la position intérieure)',
               onPressed: _rescanToResync,
             ),
         ],
@@ -184,11 +183,7 @@ class _ArNavigationScreenState extends ConsumerState<ArNavigationScreen> {
     _objectManager!.onInitialize();
 
     _placeDirectionArrow();
-    if (widget.isIndoor) {
-      _startIndoorNavigation();
-    } else {
-      _startOutdoorNavigation();
-    }
+    _startNavigation();
   }
 
   /// Place le modèle 3D de flèche (voir `assets/models/arrow.glb` — généré
@@ -211,46 +206,60 @@ class _ArNavigationScreenState extends ConsumerState<ArNavigationScreen> {
     }
   }
 
-  // --- Mode extérieur (GPS + boussole) ---------------------------------
+  // --- Démarrage : un seul trajet, GPS et odométrie tournent ensemble ---
 
-  Future<void> _startOutdoorNavigation() async {
+  Future<void> _startNavigation() async {
     final graph = ref.read(mapGraphProvider);
     if (graph == null) {
       _showError('Aucune carte chargée.');
       return;
     }
 
-    final hasPermission = await _locationService.ensurePermission();
-    if (!mounted) return;
-    if (!hasPermission) {
-      _showError('Permission de localisation refusée.');
-      return;
+    if (widget.startNodeId != null) {
+      ref.read(navigationProvider.notifier).startRoute(
+            graph,
+            widget.startNodeId!,
+            widget.destinationNodeId,
+          );
+    } else {
+      final hasPermission = await _locationService.ensurePermission();
+      if (!mounted) return;
+      if (!hasPermission) {
+        _showError('Permission de localisation refusée.');
+        return;
+      }
+      final Position position;
+      try {
+        position = await _locationService.getCurrentPosition();
+      } catch (_) {
+        _showError('Impossible de récupérer la position GPS. Activez le GPS et réessayez.');
+        return;
+      }
+      if (!mounted) return;
+      ref.read(navigationProvider.notifier).startRouteToDestination(
+            graph,
+            position.latitude,
+            position.longitude,
+            widget.destinationNodeId,
+          );
     }
-
-    final Position position;
-    try {
-      position = await _locationService.getCurrentPosition();
-    } catch (_) {
-      _showError('Impossible de récupérer la position GPS. Activez le GPS et réessayez.');
-      return;
-    }
-    if (!mounted) return;
-
-    ref.read(navigationProvider.notifier).startRouteToDestination(
-          graph,
-          position.latitude,
-          position.longitude,
-          widget.destinationNodeId,
-        );
 
     if (!_checkRouteFound()) return;
 
     setState(() {
       _isLoadingRoute = false;
-      _status = 'Calcul de votre position en cours...';
+      _status = _isCurrentStepIndoor ? 'Continuez tout droit' : 'Calcul de votre position en cours...';
     });
     _poseSubscription = _sensorFusion.poseStream().listen(_onOutdoorPoseUpdate);
+    _stepDistanceSubscription =
+        _stepCounter.distanceStream().listen(_onIndoorDistanceUpdate);
   }
+
+  /// `true` si l'étape courante vise un nœud sans coordonnées GPS (pièce
+  /// intérieure) — c'est ce qui détermine, étape par étape, quelle source de
+  /// suivi fait autorité (voir le garde-fou dans `NavigationNotifier`).
+  bool get _isCurrentStepIndoor =>
+      ref.read(navigationProvider).currentStep?.to.latitude == null;
 
   void _onOutdoorPoseUpdate(UserPose pose) {
     if (!mounted) return;
@@ -267,6 +276,8 @@ class _ArNavigationScreenState extends ConsumerState<ArNavigationScreen> {
     }
 
     if (_handleArrivalIfNeeded()) return;
+    if (_promptEntranceScanIfNeeded()) return;
+    if (_isCurrentStepIndoor) return; // l'odométrie fait autorité ici
 
     final step = ref.read(navigationProvider).currentStep;
     if (step == null) return;
@@ -283,31 +294,6 @@ class _ArNavigationScreenState extends ConsumerState<ArNavigationScreen> {
     }
   }
 
-  // --- Mode intérieur (départ connu via QR + odométrie à pas) ----------
-
-  void _startIndoorNavigation() {
-    final graph = ref.read(mapGraphProvider);
-    if (graph == null) {
-      _showError('Aucune carte chargée.');
-      return;
-    }
-
-    ref.read(navigationProvider.notifier).startRoute(
-          graph,
-          widget.indoorStartNodeId!,
-          widget.destinationNodeId,
-        );
-
-    if (!_checkRouteFound()) return;
-
-    setState(() {
-      _isLoadingRoute = false;
-      _status = 'Continuez tout droit';
-    });
-    _stepDistanceSubscription =
-        _stepCounter.distanceStream().listen(_onIndoorDistanceUpdate);
-  }
-
   void _onIndoorDistanceUpdate(double totalDistanceSinceStart) {
     if (!mounted) return;
     // Le flux donne une distance cumulée depuis l'abonnement ; on ne
@@ -316,13 +302,34 @@ class _ArNavigationScreenState extends ConsumerState<ArNavigationScreen> {
     _lastStepDistance = totalDistanceSinceStart;
     if (delta <= 0) return;
 
+    final wasIndoor = _isCurrentStepIndoor;
     ref.read(navigationProvider.notifier).advanceByDistance(delta);
 
     if (_handleArrivalIfNeeded()) return;
+    if (_promptEntranceScanIfNeeded()) return;
+    if (!wasIndoor) return; // ce delta ne devait pas faire avancer ce trajet
 
     final step = ref.read(navigationProvider).currentStep;
     if (step == null) return;
     setState(() => _status = 'Continuez tout droit · ${_formatDistance(step.distanceMeters)}');
+  }
+
+  /// Dès que le trajet passe pour la première fois d'un nœud extérieur à un
+  /// nœud intérieur (arrivée à l'entrée d'un bâtiment), suggère de scanner le
+  /// QR collé là pour caler précisément le suivi par odométrie qui prend le
+  /// relais — sans bloquer la progression si l'utilisateur l'ignore.
+  bool _promptEntranceScanIfNeeded() {
+    if (_hasPromptedEntranceScan || !_isCurrentStepIndoor || !mounted) return false;
+    _hasPromptedEntranceScan = true;
+    setState(() => _status = 'Vous entrez dans le bâtiment · scannez le QR à l\'entrée pour affiner');
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text('Scannez le QR à l\'entrée pour une position précise'),
+        action: SnackBarAction(label: 'Scanner', onPressed: _rescanToResync),
+        duration: const Duration(seconds: 6),
+      ),
+    );
+    return true;
   }
 
   /// Ouvre le scanner pour rescanner un QR code en cours de route et

@@ -27,6 +27,14 @@ class MapNode {
   /// seul le baromètre est fiable, et seulement en relatif, pas en absolu).
   final int? floor;
 
+  /// Bâtiment auquel appartient ce nœud (uniquement pertinent pour
+  /// [kind] == indoorAnchor). `null` = nœud extérieur (chemin/repère public).
+  /// C'est ce qui permet à un même graphe unique de représenter plusieurs
+  /// bâtiments : le trajet entre deux nœuds de `buildingId` différents passe
+  /// naturellement par les nœuds extérieurs qui les relient (calculé par
+  /// Dijkstra sans notion de "mode" — voir `MapGraph.shortestPath`).
+  final String? buildingId;
+
   const MapNode({
     required this.id,
     required this.label,
@@ -39,6 +47,7 @@ class MapNode {
     this.localY,
     this.localZ,
     this.floor,
+    this.buildingId,
   });
 
   factory MapNode.fromJson(Map<String, dynamic> json) => MapNode(
@@ -53,6 +62,7 @@ class MapNode {
         localY: (json['localY'] as num?)?.toDouble(),
         localZ: (json['localZ'] as num?)?.toDouble(),
         floor: (json['floor'] as num?)?.toInt(),
+        buildingId: json['buildingId'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
@@ -67,7 +77,23 @@ class MapNode {
         if (localY != null) 'localY': localY,
         if (localZ != null) 'localZ': localZ,
         if (floor != null) 'floor': floor,
+        if (buildingId != null) 'buildingId': buildingId,
       };
+
+  MapNode copyWith({String? label, int? floor, String? buildingId}) => MapNode(
+        id: id,
+        label: label ?? this.label,
+        kind: kind,
+        latitude: latitude,
+        longitude: longitude,
+        altitude: altitude,
+        anchorId: anchorId,
+        localX: localX,
+        localY: localY,
+        localZ: localZ,
+        floor: floor ?? this.floor,
+        buildingId: buildingId ?? this.buildingId,
+      );
 }
 
 enum NodeKind { outdoorGps, indoorAnchor }

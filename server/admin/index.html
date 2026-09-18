@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pentamap — Administration</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  :root {
+    --blue: #3D6FE0;
+    --orange: #E08A3C;
+    --ink: #14181F;
+    --surface: #F7F4EE;
+    --border: #E4DFD3;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
+    color: var(--ink); background: var(--surface); height: 100vh; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+    background: white; border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 17px; margin: 0; }
+  header .mark { width: 26px; height: 26px; border-radius: 8px; background: var(--blue); }
+  header .spacer { flex: 1; }
+  header button { border: none; background: var(--surface); border-radius: 8px; padding: 8px 14px;
+    cursor: pointer; font-size: 13px; }
+  header button:hover { background: var(--border); }
+  .layout { display: flex; height: calc(100vh - 53px); }
+  #map { flex: 1; }
+  aside {
+    width: 380px; background: white; border-left: 1px solid var(--border);
+    display: flex; flex-direction: column;
+  }
+  .tabs { display: flex; border-bottom: 1px solid var(--border); }
+  .tabs button {
+    flex: 1; padding: 12px; border: none; background: none; cursor: pointer;
+    font-size: 13px; font-weight: 600; color: #888; border-bottom: 2px solid transparent;
+  }
+  .tabs button.active { color: var(--blue); border-bottom-color: var(--blue); }
+  .panel { flex: 1; overflow-y: auto; padding: 14px; display: none; }
+  .panel.active { display: block; }
+  .hint { font-size: 12px; color: #888; margin: 0 0 12px; line-height: 1.5; }
+  .card {
+    border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 10px;
+  }
+  .card h3 { margin: 0 0 4px; font-size: 14px; }
+  .card .meta { font-size: 12px; color: #888; }
+  .card .row { display: flex; gap: 8px; margin-top: 8px; }
+  .card .row button { flex: 1; }
+  label { display: block; font-size: 12px; font-weight: 600; margin: 10px 0 4px; }
+  input, select {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+    font-size: 13px; background: var(--surface);
+  }
+  .btn { border: none; border-radius: 8px; padding: 9px 12px; font-size: 13px; cursor: pointer; }
+  .btn-primary { background: var(--blue); color: white; }
+  .btn-outline { background: none; border: 1px solid var(--border); }
+  .btn-danger { background: none; color: #c0392b; border: 1px solid #eecccc; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .btn-block { width: 100%; margin-top: 12px; }
+  .floor-group { margin-top: 10px; }
+  .floor-group h4 { font-size: 12px; color: #888; margin: 10px 0 4px; }
+  .room-row { display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 0; font-size: 13px; border-bottom: 1px solid #f0ede4; }
+  .room-row button { border: none; background: none; color: #c0392b; cursor: pointer; font-size: 16px; }
+  .placement-banner {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    background: var(--ink); color: white; padding: 8px 16px; border-radius: 20px;
+    font-size: 13px; z-index: 1000; display: none;
+  }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px;
+    background: var(--surface); margin-left: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="mark"></div>
+  <h1>Pentamap — Administration</h1>
+  <span id="graphName" class="badge"></span>
+  <div class="spacer"></div>
+  <button onclick="reload()">↻ Actualiser</button>
+</header>
+<div class="layout">
+  <div style="position:relative; flex:1;">
+    <div id="map"></div>
+    <div id="placementBanner" class="placement-banner"></div>
+  </div>
+  <aside>
+    <div class="tabs">
+      <button class="active" data-tab="buildings">Bâtiments</button>
+      <button data-tab="outdoor">Points extérieurs</button>
+      <button data-tab="edges">Liaisons</button>
+    </div>
+
+    <div class="panel active" id="panel-buildings">
+      <p class="hint">Cliquez sur "Nouveau bâtiment" puis sur la carte pour le placer à sa position géographique réelle.</p>
+      <button class="btn btn-primary btn-block" onclick="startPlaceBuilding()">+ Nouveau bâtiment</button>
+      <div id="buildingsList"></div>
+    </div>
+
+    <div class="panel" id="panel-outdoor">
+      <p class="hint">Points du réseau extérieur (chemins, entrées, repères) — cliquez sur la carte pour en placer un.</p>
+      <button class="btn btn-primary btn-block" onclick="startPlaceOutdoorNode()">+ Nouveau point extérieur</button>
+      <div id="outdoorList"></div>
+    </div>
+
+    <div class="panel" id="panel-edges">
+      <p class="hint">Liaisons entre deux points quelconques (extérieurs ou pièces) — la distance se calcule automatiquement si possible.</p>
+      <label>De</label>
+      <select id="edgeFrom"></select>
+      <label>Vers</label>
+      <select id="edgeTo"></select>
+      <label>Distance (mètres)</label>
+      <input id="edgeDistance" type="number" step="0.1" />
+      <label><input type="checkbox" id="edgeBidi" checked style="width:auto; margin-right:6px;" /> Bidirectionnel</label>
+      <button class="btn btn-primary btn-block" onclick="createEdge()">Créer la liaison</button>
+      <div id="edgesList" style="margin-top:16px;"></div>
+    </div>
+  </aside>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const api = (path, opts) => fetch(path, {
+  headers: {'Content-Type': 'application/json'},
+  ...opts,
+}).then(async r => {
+  if (!r.ok) throw new Error(await r.text());
+  return r.status === 204 ? null : r.json();
+});
+
+let graph = null; // {id, name, nodes, edges, buildings}
+let map, buildingMarkers = [], nodeMarkers = [];
+let placementMode = null; // 'building' | 'node' | null
+
+function initMap() {
+  map = L.map('map').setView([3.848, 11.502], 15);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors · www.propentatech.com',
+    maxZoom: 19,
+  }).addTo(map);
+  map.on('click', onMapClick);
+}
+
+function onMapClick(e) {
+  if (placementMode === 'building') {
+    placementMode = null;
+    hideBanner();
+    openBuildingForm({lat: e.latlng.lat, lon: e.latlng.lng});
+  } else if (placementMode === 'node') {
+    placementMode = null;
+    hideBanner();
+    openOutdoorNodeForm({lat: e.latlng.lat, lon: e.latlng.lng});
+  }
+}
+
+function showBanner(text) {
+  const b = document.getElementById('placementBanner');
+  b.textContent = text;
+  b.style.display = 'block';
+}
+function hideBanner() { document.getElementById('placementBanner').style.display = 'none'; }
+
+function startPlaceBuilding() {
+  placementMode = 'building';
+  showBanner('Cliquez sur la carte pour placer le bâtiment');
+}
+function startPlaceOutdoorNode() {
+  placementMode = 'node';
+  showBanner('Cliquez sur la carte pour placer le point');
+}
+
+// --- Chargement du graphe actif ---------------------------------------
+
+async function ensureActiveGraph() {
+  const graphs = await api('/graphs');
+  if (graphs.length === 0) {
+    return api('/graphs', {method: 'POST', body: JSON.stringify({name: 'Site principal'})});
+  }
+  return graphs[0];
+}
+
+async function reload() {
+  const summary = await ensureActiveGraph();
+  graph = await api(`/graphs/${summary.id}`);
+  document.getElementById('graphName').textContent = graph.name;
+  renderAll();
+}
+
+// --- Rendu --------------------------------------------------------------
+
+function renderAll() {
+  renderMapMarkers();
+  renderBuildingsList();
+  renderOutdoorList();
+  renderEdgeSelects();
+  renderEdgesList();
+}
+
+function renderMapMarkers() {
+  buildingMarkers.forEach(m => map.removeLayer(m));
+  nodeMarkers.forEach(m => map.removeLayer(m));
+  buildingMarkers = [];
+  nodeMarkers = [];
+
+  for (const n of graph.nodes.filter(n => n.kind === 'outdoorGps')) {
+    const m = L.circleMarker([n.latitude, n.longitude], {
+      radius: 7, color: '#fff', weight: 2, fillColor: '#3D6FE0', fillOpacity: 1,
+    }).addTo(map).bindPopup(`<b>${n.label}</b><br>point extérieur`);
+    nodeMarkers.push(m);
+  }
+  for (const b of graph.buildings) {
+    const m = L.circleMarker([b.latitude, b.longitude], {
+      radius: 11, color: '#fff', weight: 3, fillColor: '#E08A3C', fillOpacity: 1,
+    }).addTo(map).bindPopup(`<b>${b.name}</b><br>bâtiment`);
+    buildingMarkers.push(m);
+  }
+  const bounds = [...buildingMarkers, ...nodeMarkers];
+  if (bounds.length) {
+    map.fitBounds(L.featureGroup(bounds).getBounds().pad(0.3));
+  }
+}
+
+function roomsByFloor(buildingId) {
+  const rooms = graph.nodes.filter(n => n.buildingId === buildingId);
+  const byFloor = {};
+  for (const r of rooms) {
+    const f = r.floor ?? 0;
+    (byFloor[f] ??= []).push(r);
+  }
+  return byFloor;
+}
+
+function renderBuildingsList() {
+  const el = document.getElementById('buildingsList');
+  el.innerHTML = '';
+  for (const b of graph.buildings) {
+    const byFloor = roomsByFloor(b.id);
+    const floors = Object.keys(byFloor).sort((a, b) => a - b);
+    const card = document.createElement('div');
+    card.className = 'card';
+    const entranceLabel = b.entranceNodeId
+      ? (graph.nodes.find(n => n.id === b.entranceNodeId)?.label ?? b.entranceNodeId)
+      : 'aucune';
+    card.innerHTML = `
+      <h3>${b.name}</h3>
+      <div class="meta">${b.latitude.toFixed(5)}, ${b.longitude.toFixed(5)} · entrée : ${entranceLabel}</div>
+      ${floors.map(f => `
+        <div class="floor-group">
+          <h4>Étage ${f}</h4>
+          ${byFloor[f].map(r => `
+            <div class="room-row">
+              <span>${r.label}</span>
+              <button data-delete-node="${r.id}">✕</button>
+            </div>`).join('')}
+        </div>
+      `).join('') || '<div class="meta" style="margin-top:8px;">Aucune pièce.</div>'}
+      <div class="row">
+        <button class="btn btn-outline" data-add-room="${b.id}">+ Pièce</button>
+        <button class="btn btn-outline" data-set-entrance="${b.id}">Entrée</button>
+        <button class="btn btn-danger" data-delete-building="${b.id}">Supprimer</button>
+      </div>
+    `;
+    el.appendChild(card);
+  }
+  el.querySelectorAll('[data-delete-node]').forEach(btn =>
+    btn.onclick = () => deleteNode(btn.dataset.deleteNode));
+  el.querySelectorAll('[data-add-room]').forEach(btn =>
+    btn.onclick = () => openRoomForm(btn.dataset.addRoom));
+  el.querySelectorAll('[data-set-entrance]').forEach(btn =>
+    btn.onclick = () => openEntranceForm(btn.dataset.setEntrance));
+  el.querySelectorAll('[data-delete-building]').forEach(btn =>
+    btn.onclick = () => deleteBuilding(btn.dataset.deleteBuilding));
+}
+
+function renderOutdoorList() {
+  const el = document.getElementById('outdoorList');
+  el.innerHTML = '';
+  for (const n of graph.nodes.filter(n => n.kind === 'outdoorGps')) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <h3>${n.label}</h3>
+      <div class="meta">${n.latitude.toFixed(5)}, ${n.longitude.toFixed(5)}</div>
+      <div class="row"><button class="btn btn-danger" data-delete="${n.id}">Supprimer</button></div>
+    `;
+    el.appendChild(card);
+  }
+  el.querySelectorAll('[data-delete]').forEach(btn =>
+    btn.onclick = () => deleteNode(btn.dataset.delete));
+}
+
+function nodeLabel(n) {
+  if (n.kind === 'outdoorGps') return `${n.label} (extérieur)`;
+  const b = graph.buildings.find(b => b.id === n.buildingId);
+  return `${n.label} (${b ? b.name : 'sans bâtiment'})`;
+}
+
+function renderEdgeSelects() {
+  const opts = graph.nodes.map(n => `<option value="${n.id}">${nodeLabel(n)}</option>`).join('');
+  document.getElementById('edgeFrom').innerHTML = opts;
+  document.getElementById('edgeTo').innerHTML = opts;
+}
+
+function renderEdgesList() {
+  const el = document.getElementById('edgesList');
+  el.innerHTML = '';
+  for (const e of graph.edges) {
+    const from = graph.nodes.find(n => n.id === e.fromNodeId)?.label ?? e.fromNodeId;
+    const to = graph.nodes.find(n => n.id === e.toNodeId)?.label ?? e.toNodeId;
+    const row = document.createElement('div');
+    row.className = 'room-row';
+    row.innerHTML = `<span>${from} → ${to} · ${e.distanceMeters.toFixed(1)} m</span>
+      <button data-delete-edge="${e.id}">✕</button>`;
+    el.appendChild(row);
+  }
+  el.querySelectorAll('[data-delete-edge]').forEach(btn =>
+    btn.onclick = () => deleteEdge(btn.dataset.deleteEdge));
+}
+
+// --- Formulaires (prompts simples — admin interne, pas grand public) ----
+
+async function openBuildingForm({lat, lon}) {
+  const name = prompt('Nom du bâtiment :');
+  if (!name) return;
+  const description = prompt('Description (optionnel) :') || null;
+  await api(`/graphs/${graph.id}/buildings`, {
+    method: 'POST',
+    body: JSON.stringify({name, latitude: lat, longitude: lon, description}),
+  });
+  await reload();
+}
+
+async function openOutdoorNodeForm({lat, lon}) {
+  const label = prompt('Nom du point :');
+  if (!label) return;
+  await api(`/graphs/${graph.id}/nodes`, {
+    method: 'POST',
+    body: JSON.stringify({label, kind: 'outdoorGps', latitude: lat, longitude: lon}),
+  });
+  await reload();
+}
+
+async function openRoomForm(buildingId) {
+  const label = prompt('Nom de la pièce :');
+  if (!label) return;
+  const floor = parseInt(prompt('Étage :', '0') || '0', 10);
+  await api(`/graphs/${graph.id}/nodes`, {
+    method: 'POST',
+    body: JSON.stringify({label, kind: 'indoorAnchor', floor, buildingId}),
+  });
+  await reload();
+}
+
+async function openEntranceForm(buildingId) {
+  const outdoor = graph.nodes.filter(n => n.kind === 'outdoorGps');
+  if (!outdoor.length) { alert('Créez d\'abord un point extérieur à utiliser comme entrée.'); return; }
+  const choice = prompt(
+    'Nœud d\'entrée (tapez le nom exact) :\n' + outdoor.map(n => `- ${n.label}`).join('\n')
+  );
+  const node = outdoor.find(n => n.label === choice);
+  if (!node) return;
+  const b = graph.buildings.find(b => b.id === buildingId);
+  await api(`/graphs/${graph.id}/buildings/${buildingId}`, {
+    method: 'PUT',
+    body: JSON.stringify({name: b.name, latitude: b.latitude, longitude: b.longitude,
+      description: b.description, entranceNodeId: node.id}),
+  });
+  await reload();
+}
+
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371000, toRad = x => x * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+['edgeFrom', 'edgeTo'].forEach(id => document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById(id).addEventListener('change', autoFillDistance);
+}));
+function autoFillDistance() {
+  const from = graph.nodes.find(n => n.id === document.getElementById('edgeFrom').value);
+  const to = graph.nodes.find(n => n.id === document.getElementById('edgeTo').value);
+  if (from?.latitude != null && to?.latitude != null) {
+    document.getElementById('edgeDistance').value = haversine(from.latitude, from.longitude, to.latitude, to.longitude).toFixed(1);
+  }
+}
+
+async function createEdge() {
+  const fromNodeId = document.getElementById('edgeFrom').value;
+  const toNodeId = document.getElementById('edgeTo').value;
+  const distanceMeters = parseFloat(document.getElementById('edgeDistance').value);
+  const bidirectional = document.getElementById('edgeBidi').checked;
+  if (!fromNodeId || !toNodeId || fromNodeId === toNodeId || isNaN(distanceMeters)) {
+    alert('Choisissez deux points différents et une distance valide.'); return;
+  }
+  await api(`/graphs/${graph.id}/edges`, {
+    method: 'POST', body: JSON.stringify({fromNodeId, toNodeId, distanceMeters, bidirectional}),
+  });
+  await reload();
+}
+
+async function deleteNode(id) {
+  if (!confirm('Supprimer ce point ?')) return;
+  await api(`/graphs/${graph.id}/nodes/${id}`, {method: 'DELETE'});
+  await reload();
+}
+async function deleteBuilding(id) {
+  if (!confirm('Supprimer ce bâtiment ? Ses pièces resteront mais seront détachées.')) return;
+  await api(`/graphs/${graph.id}/buildings/${id}`, {method: 'DELETE'});
+  await reload();
+}
+async function deleteEdge(id) {
+  if (!confirm('Supprimer cette liaison ?')) return;
+  await api(`/graphs/${graph.id}/edges/${id}`, {method: 'DELETE'});
+  await reload();
+}
+
+// --- Tabs ------------------------------------------------------------
+
+document.querySelectorAll('.tabs button').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
+  };
+});
+
+initMap();
+reload().catch(err => alert('Impossible de joindre le serveur : ' + err.message));
+</script>
+</body>
+</html>

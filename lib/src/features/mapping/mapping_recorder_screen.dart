@@ -16,6 +16,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 
+import '../../core/models/building.dart';
 import '../../core/models/map_edge.dart';
 import '../../core/models/map_graph.dart';
 import '../../core/models/map_node.dart';
@@ -74,7 +75,11 @@ class _MappingRecorderScreenState
   bool _outdoorMode = true;
   int _nodeCounter = 0;
   bool _isUploading = false;
+  bool _isCreatingBuilding = false;
   int _currentFloor = 0;
+  String? _graphId;
+  List<Building> _buildings = [];
+  String? _selectedBuildingId;
 
   StreamSubscription<double>? _barometerSubscription;
   double? _floorReferenceHpa;
@@ -82,20 +87,33 @@ class _MappingRecorderScreenState
   @override
   void initState() {
     super.initState();
-    // Reprend une carte déjà chargée (persistée ou importée) plutôt que de
-    // repartir de zéro et l'écraser silencieusement au premier point ajouté.
-    final existingGraph = ref.read(mapGraphProvider);
-    if (existingGraph != null) {
-      _nodes.addAll(existingGraph.nodes.values);
-      _edges.addAll(existingGraph.edges);
-      // Repart après le plus grand suffixe "node_N" déjà utilisé, pour ne
-      // jamais régénérer un id déjà pris (les ids importés ne suivent pas
-      // forcément ce format, d'où le `whereType`/parsing défensif).
+    _loadActiveGraph();
+  }
+
+  /// Reprend le site actif (persisté, ou téléchargé depuis le serveur — en
+  /// créé un vide si besoin) plutôt que de repartir de zéro et l'écraser
+  /// silencieusement au premier point ajouté.
+  Future<void> _loadActiveGraph() async {
+    var graph = ref.read(mapGraphProvider);
+    if (graph == null || graph.id == null) {
+      try {
+        graph = await ref.read(mapGraphProvider.notifier).refreshFromServer(_apiClient);
+      } catch (_) {
+        _showMessage("Impossible de joindre le serveur pour récupérer le site actif.");
+        return;
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _graphId = graph!.id;
+      _buildings = graph.buildings;
+      _nodes.addAll(graph.nodes.values);
+      _edges.addAll(graph.edges);
       final usedIndexes = _nodes
           .map((n) => int.tryParse(n.id.replaceFirst('node_', '')))
           .whereType<int>();
       _nodeCounter = usedIndexes.isEmpty ? 0 : usedIndexes.reduce(max) + 1;
-    }
+    });
   }
 
   @override
@@ -133,21 +151,48 @@ class _MappingRecorderScreenState
           ),
         ],
       ),
-      body: Column(
+      body: _graphId == null
+          ? const Center(child: CircularProgressIndicator())
+          : Column(
+              children: [
+                SwitchListTile(
+                  title: const Text('Mode extérieur (GPS)'),
+                  subtitle: Text(_outdoorMode
+                      ? 'Les points seront capturés via le GPS'
+                      : "Touchez une surface dans l'image pour poser une ancre"),
+                  value: _outdoorMode,
+                  onChanged: _onModeChanged,
+                ),
+                if (!_outdoorMode) ...[_buildBuildingSelector(), _buildFloorSelector()],
+                Expanded(
+                  child: _outdoorMode ? _buildOutdoorPanel() : _buildIndoorArView(),
+                ),
+                _buildNodeList(),
+              ],
+            ),
+    );
+  }
+
+  Widget _buildBuildingSelector() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Row(
         children: [
-          SwitchListTile(
-            title: const Text('Mode extérieur (GPS)'),
-            subtitle: Text(_outdoorMode
-                ? 'Les points seront capturés via le GPS'
-                : "Touchez une surface dans l'image pour poser une ancre"),
-            value: _outdoorMode,
-            onChanged: _onModeChanged,
-          ),
-          if (!_outdoorMode) _buildFloorSelector(),
+          const Text('Bâtiment : '),
+          const SizedBox(width: 8),
           Expanded(
-            child: _outdoorMode ? _buildOutdoorPanel() : _buildIndoorArView(),
+            child: DropdownButton<String?>(
+              isExpanded: true,
+              value: _selectedBuildingId,
+              hint: const Text('Aucun (pièce non rattachée)'),
+              items: [
+                const DropdownMenuItem(value: null, child: Text('Aucun')),
+                for (final b in _buildings)
+                  DropdownMenuItem(value: b.id, child: Text(b.name)),
+              ],
+              onChanged: (v) => setState(() => _selectedBuildingId = v),
+            ),
           ),
-          _buildNodeList(),
         ],
       ),
     );
@@ -202,10 +247,100 @@ class _MappingRecorderScreenState
 
   Widget _buildOutdoorPanel() {
     return Center(
-      child: FilledButton.icon(
-        icon: const Icon(Icons.add_location_alt),
-        label: const Text('Ajouter un point ici (GPS)'),
-        onPressed: _addOutdoorNode,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FilledButton.icon(
+            icon: const Icon(Icons.add_location_alt),
+            label: const Text('Ajouter un point ici (GPS)'),
+            onPressed: _addOutdoorNode,
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            icon: _isCreatingBuilding
+                ? const SizedBox(
+                    width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.apartment_outlined),
+            label: const Text('Créer un bâtiment ici (GPS)'),
+            onPressed: _isCreatingBuilding ? null : _createBuildingHere,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Place un bâtiment à la position GPS actuelle : ajoute aussi un nœud
+  /// extérieur "Entrée" à cet endroit, marqué comme nœud d'entrée du
+  /// bâtiment — c'est ce nœud qui relie le réseau extérieur aux pièces
+  /// intérieures qu'on rattachera ensuite via le sélecteur "Bâtiment".
+  Future<void> _createBuildingHere() async {
+    final name = await _promptForText('Nom du bâtiment');
+    if (name == null || name.trim().isEmpty) return;
+    final hasPermission = await _locationService.ensurePermission();
+    if (!mounted) return;
+    if (!hasPermission) {
+      _showMessage('Permission de localisation refusée.');
+      return;
+    }
+    setState(() => _isCreatingBuilding = true);
+    try {
+      final position = await _locationService.getCurrentPosition();
+      final entranceNode = MapNode(
+        id: _nextNodeId(),
+        label: 'Entrée — ${name.trim()}',
+        kind: NodeKind.outdoorGps,
+        latitude: position.latitude,
+        longitude: position.longitude,
+        altitude: position.altitude,
+      );
+      final created = await _apiClient.createBuilding(
+        _graphId!,
+        Building(
+          id: '', graphId: _graphId!, name: name.trim(),
+          latitude: position.latitude, longitude: position.longitude,
+        ),
+      );
+      _appendNode(entranceNode);
+      final withEntrance = await _apiClient.updateBuilding(
+        _graphId!,
+        Building(
+          id: created.id, graphId: _graphId!, name: created.name,
+          latitude: created.latitude, longitude: created.longitude,
+          entranceNodeId: entranceNode.id,
+        ),
+      );
+      if (!mounted) return;
+      setState(() {
+        _buildings = [..._buildings, withEntrance];
+        _selectedBuildingId = withEntrance.id;
+      });
+      _showMessage('Bâtiment "${withEntrance.name}" créé avec son entrée.');
+    } on MapGraphApiException catch (e) {
+      _showMessage('Échec : $e');
+    } catch (_) {
+      _showMessage("Impossible de joindre le serveur.");
+    } finally {
+      if (mounted) setState(() => _isCreatingBuilding = false);
+    }
+  }
+
+  Future<String?> _promptForText(String title) {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: TextField(controller: controller, autofocus: true),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('Créer'),
+          ),
+        ],
       ),
     );
   }
@@ -326,6 +461,7 @@ class _MappingRecorderScreenState
         localY: translation.y,
         localZ: translation.z,
         floor: _currentFloor,
+        buildingId: _selectedBuildingId,
       ),
     );
   }
@@ -345,7 +481,8 @@ class _MappingRecorderScreenState
       _nodes.add(node);
     });
     ref.read(mapGraphProvider.notifier).setGraph(
-          MapGraph(nodes: {for (final n in _nodes) n.id: n}, edges: _edges),
+          MapGraph(id: _graphId, nodes: {for (final n in _nodes) n.id: n},
+              edges: _edges, buildings: _buildings),
         );
   }
 
@@ -371,35 +508,34 @@ class _MappingRecorderScreenState
 
   void _exportGraph() {
     final graph = MapGraph(
+      id: _graphId,
       nodes: {for (final n in _nodes) n.id: n},
       edges: _edges,
+      buildings: _buildings,
     );
     final jsonString = const JsonEncoder.withIndent('  ').convert(graph.toJson());
     Clipboard.setData(ClipboardData(text: jsonString));
     _showMessage('Graphe copié dans le presse-papiers (${_nodes.length} points).');
   }
 
+  /// Envoie tous les points/liaisons accumulés localement vers le site actif
+  /// (append en lot — les points déjà connus du serveur sont simplement
+  /// remplacés à l'identique, sans risque de doublon, voir `bulkAddNodes`).
   Future<void> _uploadToServer() async {
-    final name = await _promptForGraphName();
-    if (name == null || name.trim().isEmpty) return;
-
+    if (_graphId == null) return;
     setState(() => _isUploading = true);
-    final graph = MapGraph(
-      nodes: {for (final n in _nodes) n.id: n},
-      edges: _edges,
-    );
     try {
-      final summary = await _apiClient.uploadGraph(name.trim(), graph);
+      await _apiClient.bulkAddNodes(_graphId!, _nodes, _edges);
       if (!mounted) return;
       final indoorNodes =
           _nodes.where((n) => n.kind == NodeKind.indoorAnchor).toList();
       if (indoorNodes.isEmpty) {
-        _showMessage('Carte "${summary.name}" envoyée au serveur (${summary.nodeCount} points).');
+        _showMessage('Envoyé au serveur (${_nodes.length} points).');
       } else {
         Navigator.of(context).push(
           MaterialPageRoute(
             builder: (_) => QrCodesScreen(
-              graphId: summary.id,
+              graphId: _graphId!,
               indoorNodes: indoorNodes,
             ),
           ),
@@ -415,29 +551,6 @@ class _MappingRecorderScreenState
     } finally {
       if (mounted) setState(() => _isUploading = false);
     }
-  }
-
-  Future<String?> _promptForGraphName() {
-    final controller = TextEditingController(
-      text: 'Carte ${DateTime.now().toIso8601String().substring(0, 16)}',
-    );
-    return showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Nom de la carte'),
-        content: TextField(controller: controller, autofocus: true),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Annuler'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('Envoyer'),
-          ),
-        ],
-      ),
-    );
   }
 
   void _showMessage(String message) {
